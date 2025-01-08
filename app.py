@@ -40,10 +40,19 @@ system_prompt = '''You are an AI assistant with the following capabilities:
 7. You can use Google Calendar API to add events to users calendar
 8. You can use Gmail API to manage emails
 
+
 When handling email-related requests:
 - For viewing emails, use the Gmail API endpoints
-- For sending emails, collect all necessary details (recipient, subject, body)
-- For modifying emails, ensure user confirmation before making changes
+- For sending emails, format the request in this exact format regardless of how the user asks:
+  "send email to: [email] subject: [subject] body: [message]"
+- Always format email requests this way, even if the user's request is conversational
+- If the user asks you to send an email about something, generate an appropriate subject and body
+- Examples of formatting:
+  User: "Can you email John about the meeting tomorrow?"
+  You: "send email to: john@email.com subject: Meeting Tomorrow body: Hello John, I'm writing regarding our meeting tomorrow..."
+  
+  User: "Email my professor that I'm sick"
+  You: "send email to: professor@university.com subject: Absence Due to Illness body: Dear Professor, I wanted to inform you..."
 
 When handling calendar-related requests:
 - For viewing events, use the calendar API endpoints
@@ -189,41 +198,52 @@ def home():
     welcome_message = chat_completion.choices[0].message.content
     return jsonify({"message": welcome_message})
 
-# Add this new function to handle sending emails
+# Update the send_email function with more detailed logging
 def send_email(service, to, subject, body):
     try:
         from email.mime.text import MIMEText
         from email.mime.multipart import MIMEMultipart
         import base64
         
-        # Create MIMEMultipart message
+        logger.info("=== Starting email send process ===")
+        logger.info(f"To: {to}")
+        logger.info(f"Subject: {subject}")
+        logger.info(f"Body: {body}")
+        
+        # Create message container
         message = MIMEMultipart()
         message['to'] = to
         message['subject'] = subject
         
-        # Add body as MIMEText
+        # Create the body
         msg = MIMEText(body)
         message.attach(msg)
         
-        # Create the raw email
-        raw_message = base64.urlsafe_b64encode(
-            message.as_bytes()
-        ).decode('utf-8')
+        # Encode the message
+        raw = base64.urlsafe_b64encode(message.as_bytes())
+        raw = raw.decode()
         
+        logger.info("Message encoded successfully")
+        
+        # Create the final message
+        body = {'raw': raw}
+        
+        logger.info("Attempting to send message...")
+        
+        # Actually send the message
         try:
-            # Send the email
             sent_message = service.users().messages().send(
                 userId='me',
-                body={'raw': raw_message}
+                body=body
             ).execute()
-            logger.info(f"Email sent successfully. Message Id: {sent_message['id']}")
-            return sent_message
-        except Exception as e:
-            logger.error(f"Error sending email: {str(e)}")
-            raise e
+            logger.info(f"Message sent successfully! Message ID: {sent_message['id']}")
+            return True
+        except Exception as send_error:
+            logger.error(f"Failed to send message: {str(send_error)}")
+            raise send_error
             
     except Exception as e:
-        logger.error(f"Error creating email: {str(e)}")
+        logger.error(f"Error in send_email: {str(e)}")
         raise e
 
 @app.route('/chat', methods=['POST'])
@@ -361,45 +381,50 @@ def chat():
             logger.debug(f"No valid event creation data found in response: {e}")
             # Not a calendar event creation response, continue normally
 
-        # Check if the response indicates an email should be sent
-        if any(word in user_message.lower() for word in ['send email', 'send an email', 'send a message']):
+        # Check if the AI's response contains a formatted email request
+        if 'send email to:' in ai_response.lower():
             try:
+                logger.info("=== Processing AI formatted email ===")
                 gmail_service = get_gmail_service()
                 
-                # Extract email details from the message
-                message_lower = user_message.lower()
+                # Extract email details from AI's formatted response
+                formatted_message = ai_response.split('\n')[0] if '\n' in ai_response else ai_response
                 
-                # Extract recipient
-                to_email = None
-                if "to:" in message_lower:
-                    to_email = message_lower.split("to:")[1].split()[0].strip()
-                elif "to " in message_lower:
-                    to_email = message_lower.split("to ")[1].split()[0].strip()
-                
-                # Extract subject
-                subject = "Message from AI Assistant"
-                if "subject:" in message_lower:
-                    subject = user_message.split("subject:")[1].split("body:")[0].strip()
-                
-                # Extract body
-                body = "No body provided"
-                if "body:" in message_lower:
-                    body = user_message.split("body:")[1].strip()
-                elif "saying" in message_lower:
-                    body = user_message.split("saying")[1].strip()
-                elif "message:" in message_lower:
-                    body = user_message.split("message:")[1].strip()
-                
-                if to_email:
-                    # Send the email
-                    send_email(gmail_service, to_email, subject, body)
-                    ai_response += f"\n\nEmail sent successfully!\nTo: {to_email}\nSubject: {subject}\nBody: {body}"
-                else:
-                    ai_response += "\n\nI couldn't determine the email recipient. Please specify using 'to: email@example.com'"
+                # Extract components using the known format
+                if 'send email to:' in formatted_message.lower():
+                    parts = formatted_message.split('subject:', 1)
+                    to_email = parts[0].split('to:', 1)[1].strip()
                     
+                    if 'body:' in parts[1]:
+                        subject_body_parts = parts[1].split('body:', 1)
+                        subject = subject_body_parts[0].strip()
+                        body = subject_body_parts[1].strip()
+                    else:
+                        subject = parts[1].strip()
+                        body = "No message content provided"
+                    
+                    # Clean up email address
+                    import re
+                    email_match = re.search(r'[\w\.-]+@[\w\.-]+\.\w+', to_email)
+                    if email_match:
+                        to_email = email_match.group(0)
+                        
+                        try:
+                            # Send the email
+                            success = send_email(gmail_service, to_email, subject, body)
+                            if success:
+                                ai_response += "\n\nEmail sent successfully!"
+                            else:
+                                ai_response += "\n\nFailed to send email. Please try again."
+                        except Exception as send_error:
+                            logger.error(f"Error sending email: {str(send_error)}")
+                            ai_response += f"\n\nFailed to send email: {str(send_error)}"
+                    else:
+                        ai_response += "\n\nCouldn't extract a valid email address. Please provide a valid email."
+                
             except Exception as e:
-                logger.error(f"Email sending error: {str(e)}")
-                ai_response += f"\n\nFailed to send email: {str(e)}"
+                logger.error(f"Email process error: {str(e)}")
+                ai_response += f"\n\nAn error occurred while processing the email: {str(e)}"
 
         # Save the conversation
         conversation_history[conversation_id].append({
