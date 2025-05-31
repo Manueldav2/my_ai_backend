@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.env
+.env.save
+.ipynb_checkpoints/
+
+# System files
+.DS_Store
+
+# Credentials and tokens
+token.pickle
+credentials.json
+firebase_creds.json
+
+# Jupyter Notebook
+.ipynb_checkpoints
+*.ipynb 

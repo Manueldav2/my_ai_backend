@@ -13,6 +13,7 @@ import pickle
 import logging
 from typing import List, Dict
 import json
+import base64
 
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
@@ -29,7 +30,7 @@ client = OpenAI(
     api_key=os.environ.get("OPENAI_API_KEY")
 )
 
-# Update the system prompt to be more specific about calendar creation
+# Update the system prompt to better handle calendar requests
 system_prompt = '''You are an AI assistant with the following capabilities:
 1. Implementing calendar events - You can view and create calendar events
 2. Managing Gmail - You can read, send, and modify emails
@@ -40,35 +41,58 @@ system_prompt = '''You are an AI assistant with the following capabilities:
 7. You can use Google Calendar API to add events to users calendar
 8. You can use Gmail API to manage emails
 
+IMPORTANT: You CAN send emails and read email metadata! The system is fully configured to:
+1. Send emails using Gmail API
+2. Read email metadata (subject, sender, date)
+3. Read full email content when requested
+4. Manage email labels and status
 
 When handling email-related requests:
-- For viewing emails, use the Gmail API endpoints
-- For sending emails, format the request in this exact format regardless of how the user asks:
+- For viewing emails, you can:
+  * List recent emails with their metadata
+  * Read full email content when requested
+  * Search for specific emails
+  * Manage email labels and status
+- For sending emails, format the request in this exact format:
   "send email to: [email] subject: [subject] body: [message]"
-- Always format email requests this way, even if the user's request is conversational
-- If the user asks you to send an email about something, generate an appropriate subject and body
-- Examples of formatting:
-  User: "Can you email John about the meeting tomorrow?"
-  You: "send email to: john@email.com subject: Meeting Tomorrow body: Hello John, I'm writing regarding our meeting tomorrow..."
+- Always confirm email content with the user before sending
+- Examples of email handling:
+  User: "Show me my recent emails"
+  You: "I'll fetch your recent emails and show you their subjects and senders."
   
-  User: "Email my professor that I'm sick"
-  You: "send email to: professor@university.com subject: Absence Due to Illness body: Dear Professor, I wanted to inform you..."
+  User: "Read the email from John"
+  You: "I'll fetch the content of the email from John for you."
+  
+  User: "Send an email to John about the meeting"
+  You: "I'll help you send that email. Here's what I propose to send:
+  send email to: john@email.com subject: Meeting Tomorrow body: Hello John, I'm writing regarding our meeting tomorrow..."
 
 When handling calendar-related requests:
-- For viewing events, use the calendar API endpoints
-- For creating events, collect all necessary details and use this format:
-  {
+1. For any calendar request, first extract these key details:
+   - Event title/summary
+   - Date(s)
+   - Start time
+   - End time
+   - Description/details
+   - Location (if provided)
+   - Attendees (if provided)
+   - Timezone (if specified, otherwise use America/New_York)
+
+2. Then format the response exactly like this:
+{
     "action": "create_event",
     "event_details": {
-      "summary": "Event title",
-      "description": "Event description",
-      "start_time": "YYYY-MM-DDTHH:MM:SS",
-      "end_time": "YYYY-MM-DDTHH:MM:SS",
-      "timezone": "User's timezone"
+        "summary": "Clear and concise title",
+        "description": "Detailed description including all relevant information",
+        "start_time": "YYYY-MM-DDTHH:MM:SS",
+        "end_time": "YYYY-MM-DDTHH:MM:SS",
+        "timezone": "America/New_York",  // or user's specified timezone
+        "location": "Location if provided",
+        "attendees": ["email1@example.com", "email2@example.com"]
     }
-  }
+}
 
-Always confirm event details with the user before creating them. When a user wants to create an event, ask for any missing information and format the response as shown above.
+Always confirm complex event details with the user before creating them.
 
 Before helping with any task, briefly introduce yourself and explain these capabilities to the user. Then proceed to help with their specific request.'''
 
@@ -90,7 +114,7 @@ def get_calendar_service():
             logger.debug("No valid credentials available")
             raise Exception("No valid credentials available")
 
-    return build('calendar', 'v3', credentials=credentials)
+    return build('calendar', 'v3', credentials=credentials, cache_discovery=False)
 
 # Add this helper function near the other helper functions
 def get_gmail_service():
@@ -110,14 +134,14 @@ def get_gmail_service():
             logger.debug("No valid credentials available")
             raise Exception("No valid credentials available")
 
-    return build('gmail', 'v1', credentials=credentials)
+    return build('gmail', 'v1', credentials=credentials, cache_discovery=False)
 
 # Add these constants after the existing imports
 SCOPES = [
     'https://www.googleapis.com/auth/calendar',  # Full calendar access
     'https://www.googleapis.com/auth/gmail.modify',  # Read, modify, and send emails
     'https://www.googleapis.com/auth/gmail.send',    # Send emails
-    'https://www.googleapis.com/auth/gmail.compose'  # Create emails
+    'https://www.googleapis.com/auth/gmail.compose',  # Create emails
 ]
 CLIENT_SECRETS_FILE = "credentials.json"  # Assuming the file is in the same directory as app.py
 CONVERSATION_HISTORY_FILE = "conversation_history.json"
@@ -198,12 +222,11 @@ def home():
     welcome_message = chat_completion.choices[0].message.content
     return jsonify({"message": welcome_message})
 
-# Update the send_email function with more detailed logging
+# Update the send_email function with more direct Gmail API usage
 def send_email(service, to, subject, body):
     try:
         from email.mime.text import MIMEText
         from email.mime.multipart import MIMEMultipart
-        import base64
         
         logger.info("=== Starting email send process ===")
         logger.info(f"To: {to}")
@@ -222,28 +245,26 @@ def send_email(service, to, subject, body):
         # Encode the message
         raw = base64.urlsafe_b64encode(message.as_bytes())
         raw = raw.decode()
-        
         logger.info("Message encoded successfully")
         
         # Create the final message
-        body = {'raw': raw}
+        message_body = {'raw': raw}
+        logger.info("Message body prepared")
         
-        logger.info("Attempting to send message...")
+        # Send the message using the simpler approach
+        logger.info("Attempting to send message through Gmail API...")
+        sent_message = service.users().messages().send(
+            userId='me',
+            body=message_body
+        ).execute()
         
-        # Actually send the message
-        try:
-            sent_message = service.users().messages().send(
-                userId='me',
-                body=body
-            ).execute()
-            logger.info(f"Message sent successfully! Message ID: {sent_message['id']}")
-            return True
-        except Exception as send_error:
-            logger.error(f"Failed to send message: {str(send_error)}")
-            raise send_error
+        logger.info(f"Message sent successfully! Message ID: {sent_message['id']}")
+        return True
             
     except Exception as e:
         logger.error(f"Error in send_email: {str(e)}")
+        logger.error(f"Error type: {type(e)}")
+        logger.error(f"Error details: {e.__dict__}")
         raise e
 
 @app.route('/chat', methods=['POST'])
@@ -283,14 +304,25 @@ def chat():
                     message = gmail_service.users().messages().get(
                         userId='me',
                         id=msg['id'],
-                        format='metadata',
-                        metadataHeaders=['Subject', 'From']
+                        format='full'  # Changed from 'metadata' to 'full' to get complete message
                     ).execute()
                     
                     headers = message['payload']['headers']
                     subject = next((h['value'] for h in headers if h['name'] == 'Subject'), 'No Subject')
                     sender = next((h['value'] for h in headers if h['name'] == 'From'), 'Unknown Sender')
-                    gmail_context += f"- From: {sender}, Subject: {subject}\n"
+                    date = next((h['value'] for h in headers if h['name'] == 'Date'), 'No Date')
+                    
+                    # Get email body
+                    body = ""
+                    if 'parts' in message['payload']:
+                        for part in message['payload']['parts']:
+                            if part['mimeType'] == 'text/plain':
+                                body = base64.urlsafe_b64decode(part['body']['data']).decode()
+                                break
+                    elif 'body' in message['payload'] and 'data' in message['payload']['body']:
+                        body = base64.urlsafe_b64decode(message['payload']['body']['data']).decode()
+                    
+                    gmail_context += f"- From: {sender}\n  Subject: {subject}\n  Date: {date}\n  Preview: {body[:100]}...\n\n"
             
             # Get calendar context (existing code)
             service = get_calendar_service()
@@ -353,47 +385,73 @@ def chat():
         try:
             # Try to parse the response as JSON if it contains event details
             if "action" in ai_response and "create_event" in ai_response:
+                logger.info("=== Processing calendar event creation ===")
                 # Extract the JSON part from the response
                 json_str = ai_response[ai_response.find("{"):ai_response.rfind("}")+1]
+                logger.info(f"Extracted JSON string: {json_str}")
+                
                 event_data = json.loads(json_str)
+                logger.info(f"Parsed event data: {event_data}")
                 
                 if event_data.get("action") == "create_event":
-                    # Create the calendar event
+                    logger.info("Getting calendar service...")
                     service = get_calendar_service()
-                    event_details = event_data.get("event_details", {})
+                    logger.info("Calendar service obtained successfully")
                     
-                    event = {
-                        'summary': event_details.get('summary'),
-                        'description': event_details.get('description'),
-                        'start': {
-                            'dateTime': event_details.get('start_time'),
-                            'timeZone': event_details.get('timezone', 'UTC'),
-                        },
-                        'end': {
-                            'dateTime': event_details.get('end_time'),
-                            'timeZone': event_details.get('timezone', 'UTC'),
-                        },
-                    }
-
-                    created_event = service.events().insert(calendarId='primary', body=event).execute()
-                    ai_response += f"\n\nEvent has been created successfully! Event ID: {created_event.get('id')}"
-        except (json.JSONDecodeError, ValueError, KeyError) as e:
-            logger.debug(f"No valid event creation data found in response: {e}")
-            # Not a calendar event creation response, continue normally
+                    event_details = event_data.get("event_details", {})
+                    logger.info(f"Event details: {event_details}")
+                    
+                    # Create the calendar event
+                    logger.info("Attempting to create calendar event...")
+                    created_event = create_calendar_event(service, event_details)
+                    logger.info(f"Event created successfully: {created_event}")
+                    
+                    # Format the success message
+                    event_time = datetime.fromisoformat(event_details.get('start_time').replace('Z', '+00:00'))
+                    formatted_time = event_time.strftime("%B %d, %Y at %I:%M %p")
+                    
+                    ai_response += f"\n\nEvent '{event_details.get('summary')}' has been created successfully for {formatted_time}!"
+                    
+                    # If it's a recurring event, add that information
+                    if event_details.get('recurrence'):
+                        ai_response += "\nThis is a recurring event."
+                
+        except json.JSONDecodeError as e:
+            logger.error(f"Error parsing event JSON: {e}")
+            logger.error(f"JSON string that failed to parse: {json_str}")
+            ai_response += "\n\nI had trouble understanding the event details. Could you please provide them again?"
+        except Exception as e:
+            logger.error(f"Error creating event: {e}")
+            logger.error(f"Error type: {type(e)}")
+            logger.error(f"Error details: {e.__dict__}")
+            ai_response += f"\n\nThere was an error creating the event: {str(e)}"
 
         # Check if the AI's response contains a formatted email request
         if 'send email to:' in ai_response.lower():
             try:
                 logger.info("=== Processing AI formatted email ===")
                 gmail_service = get_gmail_service()
+                logger.info("Gmail service obtained successfully")
                 
                 # Extract email details from AI's formatted response
-                formatted_message = ai_response.split('\n')[0] if '\n' in ai_response else ai_response
+                # Find the line that starts with "send email to:"
+                email_lines = [line for line in ai_response.split('\n') if 'send email to:' in line.lower()]
+                if not email_lines:
+                    logger.error("No properly formatted email request found in response")
+                    ai_response += "\n\nI couldn't find a properly formatted email request. Please try again with the format: 'send email to: [email] subject: [subject] body: [message]'"
+                    return jsonify({
+                        "response": ai_response,
+                        "conversation_id": conversation_id
+                    })
+                
+                formatted_message = email_lines[0]
+                logger.info(f"Formatted message: {formatted_message}")
                 
                 # Extract components using the known format
                 if 'send email to:' in formatted_message.lower():
                     parts = formatted_message.split('subject:', 1)
                     to_email = parts[0].split('to:', 1)[1].strip()
+                    logger.info(f"Extracted email: {to_email}")
                     
                     if 'body:' in parts[1]:
                         subject_body_parts = parts[1].split('body:', 1)
@@ -403,27 +461,38 @@ def chat():
                         subject = parts[1].strip()
                         body = "No message content provided"
                     
+                    logger.info(f"Extracted subject: {subject}")
+                    logger.info(f"Extracted body: {body}")
+                    
                     # Clean up email address
                     import re
                     email_match = re.search(r'[\w\.-]+@[\w\.-]+\.\w+', to_email)
                     if email_match:
                         to_email = email_match.group(0)
+                        logger.info(f"Cleaned email address: {to_email}")
                         
                         try:
                             # Send the email
+                            logger.info("Attempting to send email...")
                             success = send_email(gmail_service, to_email, subject, body)
+                            logger.info(f"Email send result: {success}")
                             if success:
                                 ai_response += "\n\nEmail sent successfully!"
                             else:
                                 ai_response += "\n\nFailed to send email. Please try again."
                         except Exception as send_error:
                             logger.error(f"Error sending email: {str(send_error)}")
+                            logger.error(f"Error type: {type(send_error)}")
+                            logger.error(f"Error details: {send_error.__dict__}")
                             ai_response += f"\n\nFailed to send email: {str(send_error)}"
                     else:
+                        logger.error(f"Invalid email format: {to_email}")
                         ai_response += "\n\nCouldn't extract a valid email address. Please provide a valid email."
                 
             except Exception as e:
                 logger.error(f"Email process error: {str(e)}")
+                logger.error(f"Error type: {type(e)}")
+                logger.error(f"Error details: {e.__dict__}")
                 ai_response += f"\n\nAn error occurred while processing the email: {str(e)}"
 
         # Save the conversation
@@ -688,6 +757,63 @@ def list_calendar_events():
         return jsonify(events)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+# Update the calendar event creation function
+def create_calendar_event(service, event_details):
+    """Create a calendar event using the Google Calendar API."""
+    try:
+        logger.info("=== Creating Calendar Event ===")
+        logger.info(f"Event details received: {event_details}")
+        
+        # Extract event details
+        summary = event_details.get('summary', 'Untitled Event')
+        description = event_details.get('description', '')
+        location = event_details.get('location', '')
+        start_time = event_details.get('start_time')
+        end_time = event_details.get('end_time')
+        attendees = event_details.get('attendees', [])
+        recurrence = event_details.get('recurrence')
+        timezone = event_details.get('timezone', 'America/New_York')  # Default to NY timezone
+        
+        logger.info(f"Extracted details - Summary: {summary}")
+        logger.info(f"Start time: {start_time}")
+        logger.info(f"End time: {end_time}")
+        logger.info(f"Location: {location}")
+        logger.info(f"Attendees: {attendees}")
+        logger.info(f"Recurrence: {recurrence}")
+        logger.info(f"Timezone: {timezone}")
+        
+        # Create the event object with the times as provided
+        event = {
+            'summary': summary,
+            'description': description,
+            'location': location,
+            'start': {
+                'dateTime': start_time,
+                'timeZone': timezone,
+            },
+            'end': {
+                'dateTime': end_time,
+                'timeZone': timezone,
+            },
+            'attendees': [{'email': email} for email in attendees] if attendees else [],
+        }
+        
+        # Add recurrence if specified
+        if recurrence:
+            logger.info("Adding recurrence rule")
+            event['recurrence'] = [recurrence]
+        
+        logger.info("Attempting to insert event into calendar...")
+        event = service.events().insert(calendarId='primary', body=event).execute()
+        logger.info(f"Event created successfully with ID: {event.get('id')}")
+        return event
+        
+    except Exception as e:
+        logger.error(f"Error creating calendar event: {e}")
+        logger.error(f"Error type: {type(e)}")
+        logger.error(f"Error details: {e.__dict__}")
+        raise
 
 # Run the application
 if __name__ == '__main__':
