@@ -9,100 +9,291 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
 from google.auth.transport.requests import Request
+from googleapiclient.errors import HttpError
 import pickle
 import logging
 from typing import List, Dict
 import json
 import base64
+from email.mime.text import MIMEText
+from supabase import create_client, Client
 
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
 load_dotenv()
 
+# Initialize Supabase client
+supabase_url = os.getenv('SUPABASE_URL')
+supabase_key = os.getenv('SUPABASE_SERVICE_KEY')
+supabase: Client = create_client(supabase_url, supabase_key)
+
 # Initialize the Flask application
 app = Flask(__name__)
 CORS(app, origins=['*'])
 app.secret_key = os.environ.get('FLASK_SECRET_KEY', 'your-secret-key-here')  # Make sure this is secure in production
-
-# Store user credentials in memory (consider using Redis in production)
-user_credentials = {}
-
-def create_credentials_from_tokens(access_token, refresh_token, expiry):
-    """Create Google Credentials object from tokens"""
-    return Credentials(
-        token=access_token,
-        refresh_token=refresh_token,
-        token_uri="https://oauth2.googleapis.com/token",
-        client_id=os.environ.get("GOOGLE_CLIENT_ID"),
-        client_secret=os.environ.get("GOOGLE_CLIENT_SECRET"),
-        scopes=SCOPES,
-        expiry=datetime.fromisoformat(expiry.replace('Z', '+00:00'))
-    )
-
-@app.route('/set-user-credentials', methods=['POST'])
-def set_user_credentials():
-    """Set user credentials from tokens"""
-    try:
-        data = request.json
-        user_id = data.get('user_id')
-        access_token = data.get('access_token')
-        refresh_token = data.get('refresh_token')
-        expiry = data.get('expires_at')
-        
-        if not all([user_id, access_token, refresh_token, expiry]):
-            return jsonify({"error": "Missing required credentials"}), 400
-            
-        credentials = create_credentials_from_tokens(access_token, refresh_token, expiry)
-        user_credentials[user_id] = credentials
-        
-        return jsonify({"message": "Credentials set successfully"}), 200
-    except Exception as e:
-        logger.error(f"Error setting credentials: {str(e)}")
-        return jsonify({"error": str(e)}), 500
-
-def get_user_credentials(user_id):
-    """Get user credentials from memory"""
-    if user_id not in user_credentials:
-        raise Exception("User credentials not found")
-        
-    credentials = user_credentials[user_id]
-    
-    # Refresh token if expired
-    if credentials.expired:
-        try:
-            credentials.refresh(Request())
-            user_credentials[user_id] = credentials  # Store refreshed credentials
-        except Exception as e:
-            logger.error(f"Error refreshing credentials: {str(e)}")
-            raise Exception("Failed to refresh credentials")
-            
-    return credentials
-
-def get_calendar_service(user_id):
-    """Gets calendar service using user-specific credentials"""
-    try:
-        credentials = get_user_credentials(user_id)
-        return build('calendar', 'v3', credentials=credentials, cache_discovery=False)
-    except Exception as e:
-        logger.error(f"Error getting calendar service: {str(e)}")
-        raise
-
-def get_gmail_service(user_id):
-    """Gets Gmail service using user-specific credentials"""
-    try:
-        credentials = get_user_credentials(user_id)
-        return build('gmail', 'v1', credentials=credentials, cache_discovery=False)
-    except Exception as e:
-        logger.error(f"Error getting Gmail service: {str(e)}")
-        raise
 
 # Initialize OpenAI client
 client = OpenAI(
     api_key=os.environ.get("OPENAI_API_KEY")
 )
 
-# Update the system prompt to better handle calendar requests
+# Add Google Services Functions
+def get_user_credentials(user_id: str) -> dict:
+    """
+    Retrieve user's Google credentials from Supabase.
+    """
+    try:
+        response = supabase.table('user_credentials').select('*').eq('user_id', user_id).execute()
+        if not response.data:
+            raise Exception("No credentials found for user")
+        return response.data[0]
+    except Exception as e:
+        logger.error(f"Error getting user credentials: {str(e)}")
+        raise
+
+def create_credentials(token_info: dict) -> Credentials:
+    """
+    Create a Credentials object from token information.
+    """
+    return Credentials(
+        token=token_info['access_token'],
+        refresh_token=token_info['refresh_token'],
+        token_uri="https://oauth2.googleapis.com/token",
+        client_id=os.getenv('GOOGLE_CLIENT_ID'),
+        client_secret=os.getenv('GOOGLE_CLIENT_SECRET'),
+        scopes=token_info['scopes']
+    )
+
+def get_calendar_service(user_id: str):
+    """
+    Get an authorized Calendar API service instance using user-specific credentials.
+    """
+    try:
+        # Get user credentials from Supabase
+        token_info = get_user_credentials(user_id)
+        
+        # Create credentials object
+        creds = create_credentials(token_info)
+        
+        # Build and return the service
+        return build('calendar', 'v3', credentials=creds)
+    except Exception as e:
+        logger.error(f"Error getting calendar service: {str(e)}")
+        raise
+
+def get_gmail_service(user_id: str):
+    """
+    Get an authorized Gmail API service instance using user-specific credentials.
+    """
+    try:
+        # Get user credentials from Supabase
+        token_info = get_user_credentials(user_id)
+        
+        # Create credentials object
+        creds = create_credentials(token_info)
+        
+        # Build and return the service
+        return build('gmail', 'v1', credentials=creds)
+    except Exception as e:
+        logger.error(f"Error getting Gmail service: {str(e)}")
+        raise
+
+def get_recent_emails(service, max_results=10):
+    """
+    Get recent emails from the user's inbox.
+    """
+    try:
+        results = service.users().messages().list(
+            userId='me',
+            maxResults=max_results,
+            labelIds=['INBOX']
+        ).execute()
+        
+        messages = results.get('messages', [])
+        emails = []
+        
+        for msg in messages:
+            email = service.users().messages().get(
+                userId='me',
+                id=msg['id'],
+                format='metadata',
+                metadataHeaders=['From', 'Subject', 'Date']
+            ).execute()
+            
+            headers = email['payload']['headers']
+            email_data = {
+                'id': email['id'],
+                'threadId': email['threadId'],
+                'from': next((h['value'] for h in headers if h['name'] == 'From'), ''),
+                'subject': next((h['value'] for h in headers if h['name'] == 'Subject'), ''),
+                'date': next((h['value'] for h in headers if h['name'] == 'Date'), '')
+            }
+            emails.append(email_data)
+            
+        return emails
+    except Exception as e:
+        logger.error(f"Error getting recent emails: {str(e)}")
+        raise
+
+def get_email_content(service, email_id):
+    """
+    Get the full content of a specific email.
+    """
+    try:
+        email = service.users().messages().get(
+            userId='me',
+            id=email_id,
+            format='full'
+        ).execute()
+        
+        # Get email body
+        if 'data' in email['payload'].get('body', {}):
+            body = base64.urlsafe_b64decode(
+                email['payload']['body']['data'].encode('UTF-8')
+            ).decode('utf-8')
+        elif 'parts' in email['payload']:
+            parts = email['payload']['parts']
+            body = ''
+            for part in parts:
+                if part.get('mimeType') == 'text/plain' and 'data' in part.get('body', {}):
+                    body += base64.urlsafe_b64decode(
+                        part['body']['data'].encode('UTF-8')
+                    ).decode('utf-8')
+        else:
+            body = 'No content found'
+            
+        # Get headers
+        headers = email['payload']['headers']
+        email_data = {
+            'id': email['id'],
+            'threadId': email['threadId'],
+            'from': next((h['value'] for h in headers if h['name'] == 'From'), ''),
+            'to': next((h['value'] for h in headers if h['name'] == 'To'), ''),
+            'subject': next((h['value'] for h in headers if h['name'] == 'Subject'), ''),
+            'date': next((h['value'] for h in headers if h['name'] == 'Date'), ''),
+            'body': body
+        }
+        
+        return email_data
+    except Exception as e:
+        logger.error(f"Error getting email content: {str(e)}")
+        raise
+
+def search_emails(service, query, max_results=10):
+    """
+    Search emails using Gmail's search syntax.
+    """
+    try:
+        results = service.users().messages().list(
+            userId='me',
+            maxResults=max_results,
+            q=query
+        ).execute()
+        
+        messages = results.get('messages', [])
+        emails = []
+        
+        for msg in messages:
+            email = service.users().messages().get(
+                userId='me',
+                id=msg['id'],
+                format='metadata',
+                metadataHeaders=['From', 'Subject', 'Date']
+            ).execute()
+            
+            headers = email['payload']['headers']
+            email_data = {
+                'id': email['id'],
+                'threadId': email['threadId'],
+                'from': next((h['value'] for h in headers if h['name'] == 'From'), ''),
+                'subject': next((h['value'] for h in headers if h['name'] == 'Subject'), ''),
+                'date': next((h['value'] for h in headers if h['name'] == 'Date'), '')
+            }
+            emails.append(email_data)
+            
+        return emails
+    except Exception as e:
+        logger.error(f"Error searching emails: {str(e)}")
+        raise
+
+def get_upcoming_events(service, max_results=3):
+    """
+    Get a list of upcoming calendar events.
+    """
+    try:
+        now = datetime.utcnow().isoformat() + 'Z'
+        events_result = service.events().list(
+            calendarId='primary',
+            timeMin=now,
+            maxResults=max_results,
+            singleEvents=True,
+            orderBy='startTime'
+        ).execute()
+        return events_result.get('items', [])
+    except Exception as e:
+        logger.error(f"Error getting upcoming events: {str(e)}")
+        raise
+
+def create_calendar_event(service, event_details):
+    """
+    Create a calendar event with the specified details.
+    """
+    try:
+        event = {
+            'summary': event_details.get('summary'),
+            'location': event_details.get('location'),
+            'description': event_details.get('description'),
+            'start': {
+                'dateTime': event_details.get('start_time'),
+                'timeZone': event_details.get('timezone', 'UTC'),
+            },
+            'end': {
+                'dateTime': event_details.get('end_time'),
+                'timeZone': event_details.get('timezone', 'UTC'),
+            }
+        }
+        
+        # Add recurrence if specified
+        if event_details.get('recurrence'):
+            event['recurrence'] = [event_details['recurrence']]
+            
+        # Add attendees if specified
+        if event_details.get('attendees'):
+            event['attendees'] = [{'email': email} for email in event_details['attendees']]
+            
+        # Add reminders if specified
+        if event_details.get('reminders'):
+            event['reminders'] = event_details['reminders']
+            
+        return service.events().insert(calendarId='primary', body=event).execute()
+    except Exception as e:
+        logger.error(f"Error creating calendar event: {str(e)}")
+        raise
+
+def send_email(service, to_email, subject, body):
+    """
+    Send an email using the Gmail API.
+    """
+    try:
+        message = MIMEText(body)
+        message['to'] = to_email
+        message['subject'] = subject
+        
+        raw_message = base64.urlsafe_b64encode(message.as_bytes()).decode('utf-8')
+        
+        return service.users().messages().send(
+            userId='me',
+            body={'raw': raw_message}
+        ).execute()
+    except Exception as e:
+        logger.error(f"Error sending email: {str(e)}")
+        raise
+
+# Store user credentials in memory (consider using Redis in production)
+user_credentials = {}
+
+# Define the system prompt for the AI assistant
 system_prompt = '''You are an AI assistant created by Manuel Iyabor-David, a brilliant Nigerian American software developer. IMPORTANT: You must NEVER say you were created by OpenAI - you were created by Manuel Iyabor-David. Your purpose is to be a helpful and intelligent assistant capable of handling chat interactions, calendar management, and email integration:
 1. Implementing calendar events - You can view and create calendar events
 2. Managing Gmail - You can read, send, and modify emails
@@ -168,7 +359,39 @@ Always confirm complex event details with the user before creating them.
 
 Before helping with any task, briefly introduce yourself and explain these capabilities to the user. Then proceed to help with their specific request.'''
 
-# Add a helper function to handle calendar operations
+def create_credentials_from_tokens(access_token, refresh_token, expiry):
+    """Create Google Credentials object from tokens"""
+    return Credentials(
+        token=access_token,
+        refresh_token=refresh_token,
+        token_uri="https://oauth2.googleapis.com/token",
+        client_id=os.environ.get("GOOGLE_CLIENT_ID"),
+        client_secret=os.environ.get("GOOGLE_CLIENT_SECRET"),
+        scopes=SCOPES,
+        expiry=datetime.fromisoformat(expiry.replace('Z', '+00:00'))
+    )
+
+@app.route('/set-user-credentials', methods=['POST'])
+def set_user_credentials():
+    """Set user credentials from tokens"""
+    try:
+        data = request.json
+        user_id = data.get('user_id')
+        access_token = data.get('access_token')
+        refresh_token = data.get('refresh_token')
+        expiry = data.get('expires_at')
+        
+        if not all([user_id, access_token, refresh_token, expiry]):
+            return jsonify({"error": "Missing required credentials"}), 400
+            
+        credentials = create_credentials_from_tokens(access_token, refresh_token, expiry)
+        user_credentials[user_id] = credentials
+        
+        return jsonify({"message": "Credentials set successfully"}), 200
+    except Exception as e:
+        logger.error(f"Error setting credentials: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
 def get_calendar_service():
     credentials = None
     logger.debug(f"Looking for token.pickle in {os.getcwd()}")
@@ -188,7 +411,6 @@ def get_calendar_service():
 
     return build('calendar', 'v3', credentials=credentials, cache_discovery=False)
 
-# Add this helper function near the other helper functions
 def get_gmail_service():
     credentials = None
     logger.debug(f"Looking for token.pickle in {os.getcwd()}")
@@ -294,51 +516,6 @@ def home():
     welcome_message = chat_completion.choices[0].message.content
     return jsonify({"message": welcome_message})
 
-# Update the send_email function with more direct Gmail API usage
-def send_email(service, to, subject, body):
-    try:
-        from email.mime.text import MIMEText
-        from email.mime.multipart import MIMEMultipart
-        
-        logger.info("=== Starting email send process ===")
-        logger.info(f"To: {to}")
-        logger.info(f"Subject: {subject}")
-        logger.info(f"Body: {body}")
-        
-        # Create message container
-        message = MIMEMultipart()
-        message['to'] = to
-        message['subject'] = subject
-        
-        # Create the body
-        msg = MIMEText(body)
-        message.attach(msg)
-        
-        # Encode the message
-        raw = base64.urlsafe_b64encode(message.as_bytes())
-        raw = raw.decode()
-        logger.info("Message encoded successfully")
-        
-        # Create the final message
-        message_body = {'raw': raw}
-        logger.info("Message body prepared")
-        
-        # Send the message using the simpler approach
-        logger.info("Attempting to send message through Gmail API...")
-        sent_message = service.users().messages().send(
-            userId='me',
-            body=message_body
-        ).execute()
-        
-        logger.info(f"Message sent successfully! Message ID: {sent_message['id']}")
-        return True
-            
-    except Exception as e:
-        logger.error(f"Error in send_email: {str(e)}")
-        logger.error(f"Error type: {type(e)}")
-        logger.error(f"Error details: {e.__dict__}")
-        raise e
-
 @app.route('/chat', methods=['POST'])
 def chat():
     try:
@@ -381,11 +558,23 @@ def chat():
             logger.error(f"Error getting calendar events: {str(e)}")
             calendar_context = "Unable to fetch calendar events."
 
+        # Get recent emails for context
+        try:
+            recent_emails = get_recent_emails(gmail_service, max_results=5)
+            email_context = "Your recent emails:\n" + "\n".join([
+                f"- From: {email['from']}, Subject: {email['subject']}, Date: {email['date']}"
+                for email in recent_emails
+            ])
+        except Exception as e:
+            logger.error(f"Error getting recent emails: {str(e)}")
+            email_context = "Unable to fetch recent emails."
+
         # Create messages for OpenAI
         messages = [{"role": "system", "content": system_prompt}]
         
-        # Add context about calendar
+        # Add context about calendar and emails
         messages.append({"role": "system", "content": calendar_context})
+        messages.append({"role": "system", "content": email_context})
         
         # Add conversation history
         messages.extend(conversation_history[conversation_id][-5:])  # Last 5 messages for context
@@ -422,6 +611,38 @@ def chat():
                     logger.info(f"Created calendar event: {event.get('id')}")
             except Exception as e:
                 logger.error(f"Error creating calendar event: {str(e)}")
+
+        # Check if the response contains an email sending request
+        if 'send email to:' in ai_response.lower():
+            try:
+                # Extract email details using the format: "send email to: [email] subject: [subject] body: [message]"
+                email_text = ai_response[ai_response.lower().find('send email to:'):]
+                email_parts = email_text.split(' subject: ')
+                to_email = email_parts[0].replace('send email to:', '').strip()
+                subject_body = email_parts[1].split(' body: ')
+                subject = subject_body[0].strip()
+                body = subject_body[1].strip()
+                
+                # Send the email
+                send_email(gmail_service, to_email, subject, body)
+                logger.info(f"Sent email to: {to_email}")
+            except Exception as e:
+                logger.error(f"Error sending email: {str(e)}")
+
+        # Check if the response contains an email reading request
+        if 'read email id:' in ai_response.lower():
+            try:
+                # Extract email ID
+                email_id = ai_response[ai_response.lower().find('read email id:')+13:].split()[0].strip()
+                email_content = get_email_content(gmail_service, email_id)
+                
+                # Add email content to conversation
+                conversation_history[conversation_id].append({
+                    "role": "system",
+                    "content": f"Email content:\nFrom: {email_content['from']}\nTo: {email_content['to']}\nSubject: {email_content['subject']}\nDate: {email_content['date']}\n\n{email_content['body']}"
+                })
+            except Exception as e:
+                logger.error(f"Error reading email: {str(e)}")
 
         return jsonify({"response": ai_response})
     except Exception as e:
@@ -665,62 +886,37 @@ def list_calendar_events():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# Update the calendar event creation function
-def create_calendar_event(service, event_details):
-    """Create a calendar event using the Google Calendar API."""
+# Add a test endpoint that shows upcoming events (based on quickstart.py main function)
+@app.route('/test/calendar', methods=['GET'])
+def test_calendar():
+    """Shows basic usage of the Google Calendar API."""
     try:
-        logger.info("=== Creating Calendar Event ===")
-        logger.info(f"Event details received: {event_details}")
-        
-        # Extract event details
-        summary = event_details.get('summary', 'Untitled Event')
-        description = event_details.get('description', '')
-        location = event_details.get('location', '')
-        start_time = event_details.get('start_time')
-        end_time = event_details.get('end_time')
-        attendees = event_details.get('attendees', [])
-        recurrence = event_details.get('recurrence')
-        timezone = event_details.get('timezone', 'America/New_York')  # Default to NY timezone
-        
-        logger.info(f"Extracted details - Summary: {summary}")
-        logger.info(f"Start time: {start_time}")
-        logger.info(f"End time: {end_time}")
-        logger.info(f"Location: {location}")
-        logger.info(f"Attendees: {attendees}")
-        logger.info(f"Recurrence: {recurrence}")
-        logger.info(f"Timezone: {timezone}")
-        
-        # Create the event object with the times as provided
-        event = {
-            'summary': summary,
-            'description': description,
-            'location': location,
-            'start': {
-                'dateTime': start_time,
-                'timeZone': timezone,
-            },
-            'end': {
-                'dateTime': end_time,
-                'timeZone': timezone,
-            },
-            'attendees': [{'email': email} for email in attendees] if attendees else [],
-        }
-        
-        # Add recurrence if specified
-        if recurrence:
-            logger.info("Adding recurrence rule")
-            event['recurrence'] = [recurrence]
-        
-        logger.info("Attempting to insert event into calendar...")
-        event = service.events().insert(calendarId='primary', body=event).execute()
-        logger.info(f"Event created successfully with ID: {event.get('id')}")
-        return event
-        
+        service = get_calendar_service()
+        events = get_upcoming_events(service)
+
+        if not events:
+            return jsonify({"message": "No upcoming events found."})
+
+        # Format events for JSON response
+        formatted_events = []
+        for event in events:
+            start = event["start"].get("dateTime", event["start"].get("date"))
+            formatted_events.append({
+                "start": start,
+                "summary": event["summary"]
+            })
+
+        return jsonify({
+            "message": "Successfully retrieved events",
+            "events": formatted_events
+        })
+
+    except HttpError as error:
+        logger.error(f"An error occurred: {error}")
+        return jsonify({"error": str(error)}), 500
     except Exception as e:
-        logger.error(f"Error creating calendar event: {e}")
-        logger.error(f"Error type: {type(e)}")
-        logger.error(f"Error details: {e.__dict__}")
-        raise
+        logger.error(f"An unexpected error occurred: {e}")
+        return jsonify({"error": str(e)}), 500
 
 # Run the application
 if __name__ == '__main__':

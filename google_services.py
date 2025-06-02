@@ -150,4 +150,122 @@ def send_email(service, to_email, subject, body):
         ).execute()
     except Exception as e:
         logger.error(f"Error sending email: {str(e)}")
+        raise
+
+def get_recent_emails(service, max_results=10):
+    """
+    Get recent emails from the user's inbox.
+    """
+    try:
+        results = service.users().messages().list(
+            userId='me',
+            maxResults=max_results,
+            labelIds=['INBOX']
+        ).execute()
+        
+        messages = results.get('messages', [])
+        emails = []
+        
+        for msg in messages:
+            email = service.users().messages().get(
+                userId='me',
+                id=msg['id'],
+                format='metadata',
+                metadataHeaders=['From', 'Subject', 'Date']
+            ).execute()
+            
+            headers = email['payload']['headers']
+            email_data = {
+                'id': email['id'],
+                'threadId': email['threadId'],
+                'from': next((h['value'] for h in headers if h['name'] == 'From'), ''),
+                'subject': next((h['value'] for h in headers if h['name'] == 'Subject'), ''),
+                'date': next((h['value'] for h in headers if h['name'] == 'Date'), '')
+            }
+            emails.append(email_data)
+            
+        return emails
+    except Exception as e:
+        logger.error(f"Error getting recent emails: {str(e)}")
+        raise
+
+def get_email_content(service, email_id):
+    """
+    Get the full content of a specific email.
+    """
+    try:
+        email = service.users().messages().get(
+            userId='me',
+            id=email_id,
+            format='full'
+        ).execute()
+        
+        # Get email body
+        if 'data' in email['payload'].get('body', {}):
+            body = base64.urlsafe_b64decode(
+                email['payload']['body']['data'].encode('UTF-8')
+            ).decode('utf-8')
+        elif 'parts' in email['payload']:
+            parts = email['payload']['parts']
+            body = ''
+            for part in parts:
+                if part.get('mimeType') == 'text/plain' and 'data' in part.get('body', {}):
+                    body += base64.urlsafe_b64decode(
+                        part['body']['data'].encode('UTF-8')
+                    ).decode('utf-8')
+        else:
+            body = 'No content found'
+            
+        # Get headers
+        headers = email['payload']['headers']
+        email_data = {
+            'id': email['id'],
+            'threadId': email['threadId'],
+            'from': next((h['value'] for h in headers if h['name'] == 'From'), ''),
+            'to': next((h['value'] for h in headers if h['name'] == 'To'), ''),
+            'subject': next((h['value'] for h in headers if h['name'] == 'Subject'), ''),
+            'date': next((h['value'] for h in headers if h['name'] == 'Date'), ''),
+            'body': body
+        }
+        
+        return email_data
+    except Exception as e:
+        logger.error(f"Error getting email content: {str(e)}")
+        raise
+
+def search_emails(service, query, max_results=10):
+    """
+    Search emails using Gmail's search syntax.
+    """
+    try:
+        results = service.users().messages().list(
+            userId='me',
+            maxResults=max_results,
+            q=query
+        ).execute()
+        
+        messages = results.get('messages', [])
+        emails = []
+        
+        for msg in messages:
+            email = service.users().messages().get(
+                userId='me',
+                id=msg['id'],
+                format='metadata',
+                metadataHeaders=['From', 'Subject', 'Date']
+            ).execute()
+            
+            headers = email['payload']['headers']
+            email_data = {
+                'id': email['id'],
+                'threadId': email['threadId'],
+                'from': next((h['value'] for h in headers if h['name'] == 'From'), ''),
+                'subject': next((h['value'] for h in headers if h['name'] == 'Subject'), ''),
+                'date': next((h['value'] for h in headers if h['name'] == 'Date'), '')
+            }
+            emails.append(email_data)
+            
+        return emails
+    except Exception as e:
+        logger.error(f"Error searching emails: {str(e)}")
         raise 
