@@ -39,12 +39,14 @@ app = Flask(__name__)
 
 # Configure CORS with more specific settings
 CORS(app, 
-     origins=["https://myai-chatbot.web.app"],
-     methods=["GET", "POST", "OPTIONS", "PUT", "DELETE"],
-     allow_headers=["Content-Type", "Authorization", "X-Requested-With", "Accept"],
-     expose_headers=["Content-Type", "Authorization"],
-     supports_credentials=True,
-     max_age=3600)
+     resources={r"/*": {
+         "origins": ["https://myai-chatbot.web.app"],
+         "methods": ["GET", "POST", "OPTIONS", "PUT", "DELETE"],
+         "allow_headers": ["Content-Type", "Authorization", "X-Requested-With", "Accept"],
+         "expose_headers": ["Content-Type", "Authorization"],
+         "supports_credentials": True,
+         "max_age": 3600
+     }})
 
 app.secret_key = os.environ.get('FLASK_SECRET_KEY', 'your-secret-key-here')  # Make sure this is secure in production
 
@@ -1011,6 +1013,41 @@ def handle_options(path=''):
     response.headers.add('Access-Control-Allow-Credentials', 'true')
     response.headers.add('Access-Control-Max-Age', '3600')
     return response
+
+@app.route('/auth/callback', methods=['POST'])
+def handle_auth_callback():
+    try:
+        data = request.get_json()
+        
+        # Extract tokens from the request
+        user_id = data.get('user_id')
+        access_token = data.get('access_token')
+        refresh_token = data.get('refresh_token')
+        expires_at = data.get('expires_at')
+        
+        if not all([user_id, access_token, refresh_token, expires_at]):
+            return jsonify({"error": "Missing required tokens"}), 400
+            
+        # Store tokens in Supabase
+        response = supabase.table('user_metadata').upsert({
+            'id': user_id,
+            'google_access_token': access_token,
+            'google_refresh_token': refresh_token,
+            'google_expires_at': expires_at,
+            'updated_at': datetime.utcnow().isoformat()
+        }).execute()
+        
+        if response.error:
+            raise Exception(response.error.message)
+            
+        # Create credentials object
+        credentials = create_credentials_from_tokens(access_token, refresh_token, expires_at)
+        user_credentials[user_id] = credentials
+        
+        return jsonify({"message": "Authentication successful"})
+    except Exception as e:
+        logger.error(f"Error in auth callback: {str(e)}")
+        return jsonify({"error": str(e)}), 500
 
 # Run the application
 if __name__ == '__main__':
