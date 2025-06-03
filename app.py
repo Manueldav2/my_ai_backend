@@ -1,4 +1,4 @@
-from flask import Flask, jsonify, request, session, redirect
+from flask import Flask, jsonify, request, session, redirect, make_response
 from flask_cors import CORS
 from openai import OpenAI
 import os
@@ -36,20 +36,16 @@ supabase: Client = create_client(supabase_url, supabase_key)
 
 # Initialize the Flask application
 app = Flask(__name__)
-CORS(app, resources={
-    r"/*": {
-        "origins": [
-            "http://localhost:3000",
-            "https://myai-chatbot.web.app",
-            "https://my-ai-frontend.vercel.app"
-        ],
-        "methods": ["GET", "POST", "OPTIONS", "PUT", "DELETE"],
-        "allow_headers": ["Content-Type", "Authorization", "X-Requested-With", "Accept"],
-        "expose_headers": ["Content-Type", "Authorization"],
-        "supports_credentials": True,
-        "max_age": 3600
-    }
-})
+
+# Configure CORS with more specific settings
+CORS(app, 
+     origins=["https://myai-chatbot.web.app"],
+     methods=["GET", "POST", "OPTIONS", "PUT", "DELETE"],
+     allow_headers=["Content-Type", "Authorization", "X-Requested-With", "Accept"],
+     expose_headers=["Content-Type", "Authorization"],
+     supports_credentials=True,
+     max_age=3600)
+
 app.secret_key = os.environ.get('FLASK_SECRET_KEY', 'your-secret-key-here')  # Make sure this is secure in production
 
 # Initialize OpenAI client
@@ -398,11 +394,19 @@ def create_credentials_from_tokens(access_token, refresh_token, expiry):
         expiry=datetime.fromisoformat(expiry.replace('Z', '+00:00'))
     )
 
-@app.route('/set-user-credentials', methods=['POST'])
+@app.route('/set-user-credentials', methods=['POST', 'OPTIONS'])
 def set_user_credentials():
-    """Set user credentials from tokens"""
+    if request.method == 'OPTIONS':
+        response = make_response()
+        response.headers.add('Access-Control-Allow-Origin', 'https://myai-chatbot.web.app')
+        response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization,X-Requested-With,Accept')
+        response.headers.add('Access-Control-Allow-Methods', 'POST,OPTIONS')
+        response.headers.add('Access-Control-Allow-Credentials', 'true')
+        response.headers.add('Access-Control-Max-Age', '3600')
+        return response
+
     try:
-        data = request.json
+        data = request.get_json()
         user_id = data.get('user_id')
         access_token = data.get('access_token')
         refresh_token = data.get('refresh_token')
@@ -414,7 +418,8 @@ def set_user_credentials():
         credentials = create_credentials_from_tokens(access_token, refresh_token, expiry)
         user_credentials[user_id] = credentials
         
-        return jsonify({"message": "Credentials set successfully"}), 200
+        response = jsonify({"message": "Credentials set successfully"})
+        return response
     except Exception as e:
         logger.error(f"Error setting credentials: {str(e)}")
         return jsonify({"error": str(e)}), 500
@@ -995,12 +1000,14 @@ def get_gmail_messages():
         logger.error(f"Error getting Gmail messages: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
-# Also add CORS headers to all responses
-@app.after_request
-def after_request(response):
+# Handle OPTIONS requests explicitly
+@app.route('/', methods=['OPTIONS'])
+@app.route('/<path:path>', methods=['OPTIONS'])
+def handle_options(path=''):
+    response = make_response()
     response.headers.add('Access-Control-Allow-Origin', 'https://myai-chatbot.web.app')
-    response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
-    response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
+    response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization,X-Requested-With,Accept')
+    response.headers.add('Access-Control-Allow-Methods', 'GET,POST,OPTIONS,PUT,DELETE')
     response.headers.add('Access-Control-Allow-Credentials', 'true')
     response.headers.add('Access-Control-Max-Age', '3600')
     return response
