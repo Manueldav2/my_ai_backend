@@ -535,19 +535,16 @@ def home():
 @app.route('/chat', methods=['POST'])
 def chat():
     try:
-        data = request.json
-        logger.debug(f"Received chat request data: {data}")
-        message = data.get('message')
-        user_id = data.get('user_id', 'default_user')
-        
-        logger.debug(f"Processing chat request - message: {message}, user_id: {user_id}")
-        
-        if not message:  # Only check for message
+        data = request.get_json()
+        user_message = data.get('message', '')
+        conversation_id = data.get('conversation_id', 'default')
+        user_id = data.get('user_id', None)
+
+        if not user_message:  # Check for message
             return jsonify({"error": "Message is required"}), 400
 
         # Get conversation history
         conversation_history = load_conversation_history()
-        conversation_id = data.get('conversation_id', 'default')
         
         if conversation_id not in conversation_history:
             conversation_history[conversation_id] = []
@@ -555,8 +552,30 @@ def chat():
         # Add user message to history
         conversation_history[conversation_id].append({
             "role": "user",
-            "content": message
+            "content": user_message
         })
+
+        # Check if the message is about email access
+        if any(keyword in user_message.lower() for keyword in ['email', 'gmail', 'mail', 'inbox']):
+            if not user_id:
+                return jsonify({
+                    'response': "I'd love to help you with your emails! To get started, you'll need to click the 'Connect Gmail' button at the top of the page. This will let me securely access your emails and help you manage them. Don't worry, you can always control what I can and can't see! Would you like me to show you where to find the button?",
+                    'requires_auth': True
+                })
+
+            try:
+                gmail_service = get_gmail_service(user_id)
+                # If we get here, the user is authenticated
+                recent_emails = get_recent_emails(gmail_service)
+                return jsonify({
+                    'response': f"I've successfully connected to your Gmail! I can now help you read and manage your emails. What would you like to do?",
+                    'emails': recent_emails
+                })
+            except Exception as e:
+                return jsonify({
+                    'response': "Looks like we need to reconnect to your Gmail. No worries! Just click the 'Connect Gmail' button at the top of the page, and I'll be able to help you with your emails right away. Would you like me to guide you through this?",
+                    'requires_auth': True
+                })
 
         # Initialize services with user credentials - make this optional
         calendar_context = "Google Calendar access not available. Please authenticate to use calendar features."
