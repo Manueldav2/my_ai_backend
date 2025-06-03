@@ -8,4 +8,5 @@ google-api-python-client==2.169.0
 firebase-admin==6.8.0
 oauth2client==3.0.0
 gunicorn==21.2.0
-supabase==2.15.2 
+supabase==2.15.2
+PyJWT==2.8.0 
