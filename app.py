@@ -23,6 +23,12 @@ logger = logging.getLogger(__name__)
 
 load_dotenv()
 
+# Add debug logging
+print("Current working directory:", os.getcwd())
+print("Environment variables:")
+print("SUPABASE_URL:", os.getenv('SUPABASE_URL'))
+print("SUPABASE_SERVICE_KEY:", os.getenv('SUPABASE_SERVICE_KEY'))
+
 # Initialize Supabase client
 supabase_url = os.getenv('SUPABASE_URL')
 supabase_key = os.getenv('SUPABASE_SERVICE_KEY')
