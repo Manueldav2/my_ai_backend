@@ -558,35 +558,29 @@ def chat():
             "content": message
         })
 
-        # Initialize services with user credentials
+        # Initialize services with user credentials - make this optional
+        calendar_context = "Google Calendar access not available. Please authenticate to use calendar features."
+        email_context = "Gmail access not available. Please authenticate to use email features."
+        
         try:
             calendar_service = get_calendar_service(user_id)
-            gmail_service = get_gmail_service(user_id)
-        except Exception as e:
-            logger.error(f"Error getting Google services: {str(e)}")
-            return jsonify({"error": "Failed to access Google services. Please ensure you're properly authenticated."}), 401
-
-        # Get recent calendar events for context
-        try:
             events = get_upcoming_events(calendar_service)
             calendar_context = "Your upcoming events:\n" + "\n".join([
                 f"- {event.get('summary', 'Untitled')} on {event.get('start', {}).get('dateTime', 'No date')}"
                 for event in events[:3]
             ])
         except Exception as e:
-            logger.error(f"Error getting calendar events: {str(e)}")
-            calendar_context = "Unable to fetch calendar events."
-
-        # Get recent emails for context
+            logger.debug(f"Calendar service not available: {str(e)}")
+            
         try:
+            gmail_service = get_gmail_service(user_id)
             recent_emails = get_recent_emails(gmail_service, max_results=5)
             email_context = "Your recent emails:\n" + "\n".join([
                 f"- From: {email['from']}, Subject: {email['subject']}, Date: {email['date']}"
                 for email in recent_emails
             ])
         except Exception as e:
-            logger.error(f"Error getting recent emails: {str(e)}")
-            email_context = "Unable to fetch recent emails."
+            logger.debug(f"Gmail service not available: {str(e)}")
 
         # Create messages for OpenAI
         messages = [{"role": "system", "content": system_prompt}]
@@ -616,52 +610,6 @@ def chat():
         
         # Save updated conversation history
         save_conversation_history(conversation_history)
-
-        # Check if the response contains a calendar event creation request
-        if '"action": "create_event"' in ai_response:
-            try:
-                # Extract the JSON part
-                json_str = ai_response[ai_response.find('{'):ai_response.rfind('}')+1]
-                event_data = json.loads(json_str)
-                
-                if event_data.get('action') == 'create_event':
-                    # Create the event using the user's calendar service
-                    event = create_calendar_event(calendar_service, event_data['event_details'])
-                    logger.info(f"Created calendar event: {event.get('id')}")
-            except Exception as e:
-                logger.error(f"Error creating calendar event: {str(e)}")
-
-        # Check if the response contains an email sending request
-        if 'send email to:' in ai_response.lower():
-            try:
-                # Extract email details using the format: "send email to: [email] subject: [subject] body: [message]"
-                email_text = ai_response[ai_response.lower().find('send email to:'):]
-                email_parts = email_text.split(' subject: ')
-                to_email = email_parts[0].replace('send email to:', '').strip()
-                subject_body = email_parts[1].split(' body: ')
-                subject = subject_body[0].strip()
-                body = subject_body[1].strip()
-                
-                # Send the email
-                send_email(gmail_service, to_email, subject, body)
-                logger.info(f"Sent email to: {to_email}")
-            except Exception as e:
-                logger.error(f"Error sending email: {str(e)}")
-
-        # Check if the response contains an email reading request
-        if 'read email id:' in ai_response.lower():
-            try:
-                # Extract email ID
-                email_id = ai_response[ai_response.lower().find('read email id:')+13:].split()[0].strip()
-                email_content = get_email_content(gmail_service, email_id)
-                
-                # Add email content to conversation
-                conversation_history[conversation_id].append({
-                    "role": "system",
-                    "content": f"Email content:\nFrom: {email_content['from']}\nTo: {email_content['to']}\nSubject: {email_content['subject']}\nDate: {email_content['date']}\n\n{email_content['body']}"
-                })
-            except Exception as e:
-                logger.error(f"Error reading email: {str(e)}")
 
         return jsonify({"response": ai_response})
     except Exception as e:
