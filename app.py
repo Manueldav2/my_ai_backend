@@ -44,7 +44,8 @@ CORS(app, resources={
             "*"  # Allow all origins for now (remove in production)
         ],
         "methods": ["GET", "POST", "OPTIONS"],
-        "allow_headers": ["Content-Type", "Authorization"]
+        "allow_headers": ["Content-Type", "Authorization"],
+        "supports_credentials": True  # Enable credentials for OAuth
     }
 })
 app.secret_key = os.environ.get('FLASK_SECRET_KEY', 'your-secret-key-here')  # Make sure this is secure in production
@@ -60,10 +61,27 @@ def get_user_credentials(user_id: str) -> dict:
     Retrieve user's Google credentials from Supabase.
     """
     try:
-        response = supabase.table('user_credentials').select('*').eq('user_id', user_id).execute()
+        response = supabase.table('user_metadata').select(
+            'google_access_token',
+            'google_refresh_token',
+            'google_expires_at'
+        ).eq('id', user_id).single()
+        
         if not response.data:
             raise Exception("No credentials found for user")
-        return response.data[0]
+            
+        return {
+            'access_token': response.data['google_access_token'],
+            'refresh_token': response.data['google_refresh_token'],
+            'expires_at': response.data['google_expires_at'],
+            'scopes': [
+                'https://www.googleapis.com/auth/calendar',
+                'https://www.googleapis.com/auth/gmail.modify',
+                'email',
+                'profile',
+                'openid'
+            ]
+        }
     except Exception as e:
         logger.error(f"Error getting user credentials: {str(e)}")
         raise
@@ -78,7 +96,8 @@ def create_credentials(token_info: dict) -> Credentials:
         token_uri="https://oauth2.googleapis.com/token",
         client_id=os.getenv('GOOGLE_CLIENT_ID'),
         client_secret=os.getenv('GOOGLE_CLIENT_SECRET'),
-        scopes=token_info['scopes']
+        scopes=token_info['scopes'],
+        expiry=datetime.fromisoformat(token_info['expires_at'].replace('Z', '+00:00'))
     )
 
 def get_calendar_service(user_id: str):
@@ -86,13 +105,8 @@ def get_calendar_service(user_id: str):
     Get an authorized Calendar API service instance using user-specific credentials.
     """
     try:
-        # Get user credentials from Supabase
         token_info = get_user_credentials(user_id)
-        
-        # Create credentials object
         creds = create_credentials(token_info)
-        
-        # Build and return the service
         return build('calendar', 'v3', credentials=creds)
     except Exception as e:
         logger.error(f"Error getting calendar service: {str(e)}")
@@ -103,13 +117,8 @@ def get_gmail_service(user_id: str):
     Get an authorized Gmail API service instance using user-specific credentials.
     """
     try:
-        # Get user credentials from Supabase
         token_info = get_user_credentials(user_id)
-        
-        # Create credentials object
         creds = create_credentials(token_info)
-        
-        # Build and return the service
         return build('gmail', 'v1', credentials=creds)
     except Exception as e:
         logger.error(f"Error getting Gmail service: {str(e)}")
@@ -455,7 +464,7 @@ SCOPES = [
 ]
 CLIENT_SECRETS_FILE = "credentials.json"  # Assuming the file is in the same directory as app.py
 CONVERSATION_HISTORY_FILE = "conversation_history.json"
-REDIRECT_URI = "http://localhost:5500/oauth2callback"  # Update if you use a different URL
+REDIRECT_URI = "http://localhost:3000/oauth2callback"  # Update this to match your frontend URL
 
 def get_upcoming_events(service, max_results=10):
     """Gets the upcoming events from the user's calendar."""
@@ -800,7 +809,12 @@ def authorize():
         
         # Store the state in session
         session['state'] = state
-        return redirect(authorization_url)  # Redirect directly instead of returning JSON
+        
+        # Return the URL instead of redirecting
+        return jsonify({
+            "authorization_url": authorization_url,
+            "state": state
+        })
     except Exception as e:
         logger.error(f"Authorization error: {e}")
         return jsonify({"error": str(e)}), 500
@@ -902,6 +916,81 @@ def test_calendar():
         return jsonify({"error": str(error)}), 500
     except Exception as e:
         logger.error(f"An unexpected error occurred: {e}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/user-metadata', methods=['GET'])
+def get_user_metadata():
+    try:
+        user_id = request.args.get('user_id')
+        if not user_id:
+            return jsonify({"error": "user_id is required"}), 400
+            
+        metadata = get_user_credentials(user_id)
+        return jsonify(metadata)
+    except Exception as e:
+        logger.error(f"Error getting user metadata: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/calendar/events', methods=['GET'])
+def get_calendar_events():
+    try:
+        user_id = request.args.get('user_id')
+        if not user_id:
+            return jsonify({"error": "user_id is required"}), 400
+            
+        service = get_calendar_service(user_id)
+        now = datetime.utcnow().isoformat() + 'Z'
+        events_result = service.events().list(
+            calendarId='primary',
+            timeMin=now,
+            maxResults=10,
+            singleEvents=True,
+            orderBy='startTime'
+        ).execute()
+        
+        return jsonify(events_result.get('items', []))
+    except Exception as e:
+        logger.error(f"Error getting calendar events: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/gmail/messages', methods=['GET'])
+def get_gmail_messages():
+    try:
+        user_id = request.args.get('user_id')
+        if not user_id:
+            return jsonify({"error": "user_id is required"}), 400
+            
+        service = get_gmail_service(user_id)
+        results = service.users().messages().list(
+            userId='me',
+            maxResults=10,
+            labelIds=['INBOX']
+        ).execute()
+        
+        messages = results.get('messages', [])
+        emails = []
+        
+        for msg in messages:
+            email = service.users().messages().get(
+                userId='me',
+                id=msg['id'],
+                format='metadata',
+                metadataHeaders=['From', 'Subject', 'Date']
+            ).execute()
+            
+            headers = email['payload']['headers']
+            email_data = {
+                'id': email['id'],
+                'threadId': email['threadId'],
+                'from': next((h['value'] for h in headers if h['name'] == 'From'), ''),
+                'subject': next((h['value'] for h in headers if h['name'] == 'Subject'), ''),
+                'date': next((h['value'] for h in headers if h['name'] == 'Date'), '')
+            }
+            emails.append(email_data)
+            
+        return jsonify(emails)
+    except Exception as e:
+        logger.error(f"Error getting Gmail messages: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
 # Run the application
