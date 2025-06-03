@@ -36,7 +36,17 @@ supabase: Client = create_client(supabase_url, supabase_key)
 
 # Initialize the Flask application
 app = Flask(__name__)
-CORS(app, origins=['*'])
+CORS(app, resources={
+    r"/*": {
+        "origins": [
+            "http://localhost:3000",  # React development server
+            "https://my-ai-frontend.vercel.app",  # Your frontend deployment URL
+            "*"  # Allow all origins for now (remove in production)
+        ],
+        "methods": ["GET", "POST", "OPTIONS"],
+        "allow_headers": ["Content-Type", "Authorization"]
+    }
+})
 app.secret_key = os.environ.get('FLASK_SECRET_KEY', 'your-secret-key-here')  # Make sure this is secure in production
 
 # Initialize OpenAI client
@@ -526,11 +536,14 @@ def home():
 def chat():
     try:
         data = request.json
+        logger.debug(f"Received chat request data: {data}")
         message = data.get('message')
-        user_id = data.get('user_id')
+        user_id = data.get('user_id', 'default_user')
         
-        if not message or not user_id:
-            return jsonify({"error": "Message and user_id are required"}), 400
+        logger.debug(f"Processing chat request - message: {message}, user_id: {user_id}")
+        
+        if not message:  # Only check for message
+            return jsonify({"error": "Message is required"}), 400
 
         # Get conversation history
         conversation_history = load_conversation_history()
