@@ -39,13 +39,15 @@ app = Flask(__name__)
 CORS(app, resources={
     r"/*": {
         "origins": [
-            "http://localhost:3000",  # React development server
-            "https://my-ai-frontend.vercel.app",  # Your frontend deployment URL
-            "*"  # Allow all origins for now (remove in production)
+            "http://localhost:3000",
+            "https://myai-chatbot.web.app",
+            "https://my-ai-frontend.vercel.app"
         ],
-        "methods": ["GET", "POST", "OPTIONS"],
-        "allow_headers": ["Content-Type", "Authorization"],
-        "supports_credentials": True  # Enable credentials for OAuth
+        "methods": ["GET", "POST", "OPTIONS", "PUT", "DELETE"],
+        "allow_headers": ["Content-Type", "Authorization", "X-Requested-With", "Accept"],
+        "expose_headers": ["Content-Type", "Authorization"],
+        "supports_credentials": True,
+        "max_age": 3600
     }
 })
 app.secret_key = os.environ.get('FLASK_SECRET_KEY', 'your-secret-key-here')  # Make sure this is secure in production
@@ -992,6 +994,16 @@ def get_gmail_messages():
     except Exception as e:
         logger.error(f"Error getting Gmail messages: {str(e)}")
         return jsonify({"error": str(e)}), 500
+
+# Also add CORS headers to all responses
+@app.after_request
+def after_request(response):
+    response.headers.add('Access-Control-Allow-Origin', 'https://myai-chatbot.web.app')
+    response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
+    response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
+    response.headers.add('Access-Control-Allow-Credentials', 'true')
+    response.headers.add('Access-Control-Max-Age', '3600')
+    return response
 
 # Run the application
 if __name__ == '__main__':
