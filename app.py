@@ -22,7 +22,15 @@ load_dotenv()
 
 # Initialize the Flask application
 app = Flask(__name__)
-CORS(app, origins=['*'])
+# Update CORS configuration to allow requests from your deployed frontend
+CORS(app, resources={
+    r"/*": {
+        "origins": ["https://myai-chatbot.web.app", "http://localhost:3000"],
+        "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+        "allow_headers": ["Content-Type"],
+        "supports_credentials": True
+    }
+})
 app.secret_key = os.environ.get('FLASK_SECRET_KEY', 'your-secret-key-here')  # Make sure this is secure in production
 
 # Store user credentials in memory (consider using Redis in production)
