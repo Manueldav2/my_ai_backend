@@ -210,14 +210,21 @@ def get_gmail_service():
 
 # Add these constants after the existing imports
 SCOPES = [
-    'https://www.googleapis.com/auth/calendar',  # Full calendar access
-    'https://www.googleapis.com/auth/gmail.modify',  # Read, modify, and send emails
-    'https://www.googleapis.com/auth/gmail.send',    # Send emails
-    'https://www.googleapis.com/auth/gmail.compose',  # Create emails
+    'https://www.googleapis.com/auth/userinfo.email',
+    'https://www.googleapis.com/auth/userinfo.profile',
+    'https://www.googleapis.com/auth/calendar',
+    'https://www.googleapis.com/auth/gmail.modify',
+    'openid'
 ]
 CLIENT_SECRETS_FILE = "credentials.json"  # Assuming the file is in the same directory as app.py
 CONVERSATION_HISTORY_FILE = "conversation_history.json"
 REDIRECT_URI = "http://localhost:5500/oauth2callback"  # Update if you use a different URL
+
+# Add these constants at the top with other constants
+ALLOWED_REDIRECT_URIS = [
+    'https://adxicbmbrimpumtubbmk.supabase.co/auth/v1/callback',
+    'https://myai-chatbot.web.app/auth/callback'
+]
 
 def get_upcoming_events(service, max_results=10):
     """Gets the upcoming events from the user's calendar."""
@@ -339,91 +346,136 @@ def send_email(service, to, subject, body):
         logger.error(f"Error details: {e.__dict__}")
         raise e
 
+def analyze_conversation_content(messages):
+    """Analyzes conversation content for key points and action items"""
+    try:
+        analysis_prompt = f"""
+        Analyze this conversation and extract:
+        1. Key discussion points
+        2. Action items
+        3. Important dates/deadlines
+        4. Any email tasks or calendar events that need to be created
+
+        Conversation:
+        {messages}
+        """
+        
+        response = client.chat.completions.create(
+            model="gpt-4",
+            messages=[
+                {"role": "system", "content": "You are an AI analyzing conversations for important information and tasks."},
+                {"role": "user", "content": analysis_prompt}
+            ]
+        )
+        
+        return response.choices[0].message.content
+    except Exception as e:
+        logger.error(f"Error analyzing conversation: {str(e)}")
+        return None
+
+def compose_intelligent_email(context, recipient, subject, tone="professional"):
+    """Composes an email based on context and parameters"""
+    try:
+        email_prompt = f"""
+        Compose an email with these details:
+        - Context: {context}
+        - Recipient: {recipient}
+        - Subject: {subject}
+        - Tone: {tone}
+
+        Format the email professionally and maintain the specified tone.
+        Include a clear subject line and appropriate greeting/closing.
+        """
+        
+        response = client.chat.completions.create(
+            model="gpt-4",
+            messages=[
+                {"role": "system", "content": "You are an expert email composer."},
+                {"role": "user", "content": email_prompt}
+            ]
+        )
+        
+        return response.choices[0].message.content
+    except Exception as e:
+        logger.error(f"Error composing email: {str(e)}")
+        return None
+
 @app.route('/chat', methods=['POST'])
 def chat():
     try:
         data = request.json
-        message = data.get('message')
+        user_message = data.get('message', '')
+        conversation_id = data.get('conversation_id')
         user_id = data.get('user_id')
-        
-        if not message or not user_id:
-            return jsonify({"error": "Message and user_id are required"}), 400
 
-        # Get conversation history
+        # Load conversation history
         conversation_history = load_conversation_history()
-        conversation_id = data.get('conversation_id', 'default')
-        
-        if conversation_id not in conversation_history:
-            conversation_history[conversation_id] = []
+        current_conversation = conversation_history.get(conversation_id, [])
         
         # Add user message to history
-        conversation_history[conversation_id].append({
-            "role": "user",
-            "content": message
-        })
-
-        # Initialize services with user credentials
-        try:
-            calendar_service = get_calendar_service(user_id)
-            gmail_service = get_gmail_service(user_id)
-        except Exception as e:
-            logger.error(f"Error getting Google services: {str(e)}")
-            return jsonify({"error": "Failed to access Google services. Please ensure you're properly authenticated."}), 401
-
-        # Get recent calendar events for context
-        try:
-            events = get_upcoming_events(calendar_service)
-            calendar_context = "Your upcoming events:\n" + "\n".join([
-                f"- {event.get('summary', 'Untitled')} on {event.get('start', {}).get('dateTime', 'No date')}"
-                for event in events[:3]
-            ])
-        except Exception as e:
-            logger.error(f"Error getting calendar events: {str(e)}")
-            calendar_context = "Unable to fetch calendar events."
-
-        # Create messages for OpenAI
-        messages = [{"role": "system", "content": system_prompt}]
+        current_conversation.append({"role": "user", "content": user_message})
         
-        # Add context about calendar
-        messages.append({"role": "system", "content": calendar_context})
+        # Check for email-related commands
+        if "compose email" in user_message.lower():
+            # Extract email details from the message using GPT
+            email_analysis = client.chat.completions.create(
+                model="gpt-4",
+                messages=[
+                    {"role": "system", "content": "Extract email details from the user's request."},
+                    {"role": "user", "content": user_message}
+                ]
+            )
+            
+            email_details = email_analysis.choices[0].message.content
+            composed_email = compose_intelligent_email(
+                context=email_details,
+                recipient="extracted_recipient@example.com",  # Extract from analysis
+                subject="Extracted Subject",  # Extract from analysis
+                tone="professional"
+            )
+            
+            response_content = f"I've composed this email for you:\n\n{composed_email}\n\nWould you like me to send it?"
         
-        # Add conversation history
-        messages.extend(conversation_history[conversation_id][-5:])  # Last 5 messages for context
-
-        # Get AI response
-        response = client.chat.completions.create(
-            model="gpt-4-1106-preview",
-            messages=messages,
-            temperature=0.7,
-            max_tokens=800
-        )
-
-        ai_response = response.choices[0].message.content
-
-        # Add AI response to history
-        conversation_history[conversation_id].append({
-            "role": "assistant",
-            "content": ai_response
-        })
+        # Check for calendar-related commands
+        elif any(keyword in user_message.lower() for keyword in ["schedule", "appointment", "meeting", "event"]):
+            # Use existing calendar integration
+            service = get_calendar_service(user_id)
+            # Process calendar request...
+            response_content = "I'll help you schedule that. Let me check your calendar..."
         
-        # Save updated conversation history
+        else:
+            # Regular chat interaction
+            messages = [{"role": "system", "content": system_prompt}]
+            messages.extend(current_conversation)
+            
+            response = client.chat.completions.create(
+                model="gpt-4",
+                messages=messages
+            )
+            
+            response_content = response.choices[0].message.content
+            
+            # Analyze conversation for action items
+            if len(current_conversation) > 2:  # Only analyze if there's enough context
+                analysis = analyze_conversation_content([msg["content"] for msg in current_conversation])
+                if analysis:
+                    # Store analysis in database or use it to suggest actions
+                    db.collection('conversation_analyses').add({
+                        'conversation_id': conversation_id,
+                        'analysis': analysis,
+                        'timestamp': datetime.now().isoformat()
+                    })
+
+        # Add assistant response to history
+        current_conversation.append({"role": "assistant", "content": response_content})
+        conversation_history[conversation_id] = current_conversation
         save_conversation_history(conversation_history)
 
-        # Check if the response contains a calendar event creation request
-        if '"action": "create_event"' in ai_response:
-            try:
-                # Extract the JSON part
-                json_str = ai_response[ai_response.find('{'):ai_response.rfind('}')+1]
-                event_data = json.loads(json_str)
-                
-                if event_data.get('action') == 'create_event':
-                    # Create the event using the user's calendar service
-                    event = create_calendar_event(calendar_service, event_data['event_details'])
-                    logger.info(f"Created calendar event: {event.get('id')}")
-            except Exception as e:
-                logger.error(f"Error creating calendar event: {str(e)}")
+        return jsonify({
+            "response": response_content,
+            "conversation_id": conversation_id
+        })
 
-        return jsonify({"response": ai_response})
     except Exception as e:
         logger.error(f"Error in chat endpoint: {str(e)}")
         return jsonify({"error": str(e)}), 500
@@ -577,62 +629,62 @@ def create_calendar_event():
         return jsonify({"error": str(e)}), 500
 
 # Add these new routes before the main run block
-@app.route('/calendar/authorize')
-def authorize():
+@app.route('/auth/google/login', methods=['GET'])
+def google_login():
     try:
         flow = Flow.from_client_secrets_file(
-            CLIENT_SECRETS_FILE, 
+            CLIENT_SECRETS_FILE,
             scopes=SCOPES,
-            redirect_uri=REDIRECT_URI
+            redirect_uri=ALLOWED_REDIRECT_URIS[0]  # Use Supabase callback
         )
+        
+        # Get the authorization URL
         authorization_url, state = flow.authorization_url(
             access_type='offline',
             include_granted_scopes='true',
             prompt='consent'
         )
         
-        # Store the state in session
+        # Store the state
         session['state'] = state
-        return redirect(authorization_url)  # Redirect directly instead of returning JSON
+        
+        return jsonify({
+            'authorization_url': authorization_url,
+            'state': state
+        })
     except Exception as e:
-        logger.error(f"Authorization error: {e}")
-        return jsonify({"error": str(e)}), 500
+        logger.error(f"Error in Google login: {str(e)}")
+        return jsonify({'error': str(e)}), 500
 
-@app.route('/oauth2callback')
-def oauth2callback():
+@app.route('/auth/google/callback', methods=['GET'])
+def google_callback():
     try:
-        # Verify state parameter
-        state = session.get('state')
-        if not state:
-            return "State parameter missing", 400
-
+        state = request.args.get('state')
+        code = request.args.get('code')
+        
+        if not state or not code:
+            return jsonify({'error': 'Missing state or code'}), 400
+            
         flow = Flow.from_client_secrets_file(
             CLIENT_SECRETS_FILE,
             scopes=SCOPES,
-            redirect_uri=REDIRECT_URI,
-            state=state  # Use the state from session
+            state=state,
+            redirect_uri=ALLOWED_REDIRECT_URIS[0]
         )
         
-        # Get the full URL including query parameters
-        authorization_response = request.url
-        if not request.is_secure:
-            # Handle non-HTTPS callback
-            authorization_response = 'https://' + authorization_response[7:]
-        
-        flow.fetch_token(authorization_response=authorization_response)
-        
-        # Save credentials
+        # Exchange code for tokens
+        flow.fetch_token(code=code)
         credentials = flow.credentials
-        with open('token.pickle', 'wb') as token:
-            pickle.dump(credentials, token)
         
-        # Clear the session state
-        session.pop('state', None)
-            
-        return "Authorization successful! You can close this window and return to the application."
+        # Store credentials
+        user_id = request.args.get('user_id', 'default_user')
+        user_credentials[user_id] = credentials
+        
+        # Redirect to frontend with success
+        return redirect(f"{ALLOWED_REDIRECT_URIS[1]}?success=true")
     except Exception as e:
-        logger.error(f"OAuth callback error: {e}")
-        return f"Error during authorization: {str(e)}", 500
+        logger.error(f"Error in Google callback: {str(e)}")
+        return redirect(f"{ALLOWED_REDIRECT_URIS[1]}?error={str(e)}")
 
 @app.route('/calendar/events')
 def list_calendar_events():
@@ -721,6 +773,84 @@ def create_calendar_event(service, event_details):
         logger.error(f"Error type: {type(e)}")
         logger.error(f"Error details: {e.__dict__}")
         raise
+
+@app.route('/tasks/automate', methods=['POST'])
+def automate_task():
+    """Endpoint to handle automated task processing"""
+    try:
+        data = request.json
+        task_type = data.get('type')
+        task_details = data.get('details')
+        user_id = data.get('user_id')
+
+        if not all([task_type, task_details, user_id]):
+            return jsonify({"error": "Missing required fields"}), 400
+
+        if task_type == "email":
+            # Handle email automation
+            gmail_service = get_gmail_service(user_id)
+            response = client.chat.completions.create(
+                model="gpt-4",
+                messages=[
+                    {"role": "system", "content": "You are an email automation assistant."},
+                    {"role": "user", "content": f"Process this email task: {task_details}"}
+                ]
+            )
+            processed_task = response.choices[0].message.content
+            
+            # Send email if required
+            if "send_email" in processed_task.lower():
+                send_email(gmail_service, 
+                         to=task_details.get('recipient'),
+                         subject=task_details.get('subject'),
+                         body=processed_task)
+                return jsonify({"message": "Email sent successfully"})
+
+        elif task_type == "calendar":
+            # Handle calendar automation
+            calendar_service = get_calendar_service(user_id)
+            response = client.chat.completions.create(
+                model="gpt-4",
+                messages=[
+                    {"role": "system", "content": "You are a calendar management assistant."},
+                    {"role": "user", "content": f"Process this calendar task: {task_details}"}
+                ]
+            )
+            processed_task = response.choices[0].message.content
+            
+            # Create calendar event if required
+            if "create_event" in processed_task.lower():
+                event = create_calendar_event(calendar_service, task_details)
+                return jsonify({"message": "Calendar event created", "event_id": event.get('id')})
+
+        elif task_type == "schedule":
+            # Handle schedule management
+            response = client.chat.completions.create(
+                model="gpt-4",
+                messages=[
+                    {"role": "system", "content": "You are a schedule management assistant."},
+                    {"role": "user", "content": f"Optimize this schedule: {task_details}"}
+                ]
+            )
+            optimized_schedule = response.choices[0].message.content
+            
+            # Store optimized schedule in database
+            db.collection('schedules').add({
+                'user_id': user_id,
+                'schedule': optimized_schedule,
+                'created_at': datetime.now().isoformat()
+            })
+            
+            return jsonify({
+                "message": "Schedule optimized",
+                "schedule": optimized_schedule
+            })
+
+        return jsonify({"error": "Invalid task type"}), 400
+
+    except Exception as e:
+        logger.error(f"Error in task automation: {str(e)}")
+        return jsonify({"error": str(e)}), 500
 
 # Run the application
 if __name__ == '__main__':
