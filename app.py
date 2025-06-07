@@ -22,18 +22,7 @@ load_dotenv()
 
 # Initialize the Flask application
 app = Flask(__name__)
-# Update CORS configuration to allow requests from your deployed frontend
-CORS(app, resources={
-    r"/*": {
-        "origins": ["https://myai-chatbot.web.app", "http://localhost:3000"],
-        "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-        "allow_headers": ["Content-Type", "Authorization", "X-Requested-With", "Accept", "Origin"],
-        "expose_headers": ["Content-Type", "Authorization"],
-        "supports_credentials": True,
-        "send_wildcard": False,
-        "max_age": 86400
-    }
-})
+CORS(app, origins=['*'])
 app.secret_key = os.environ.get('FLASK_SECRET_KEY', 'your-secret-key-here')  # Make sure this is secure in production
 
 # Store user credentials in memory (consider using Redis in production)
@@ -735,35 +724,4 @@ def create_calendar_event(service, event_details):
 
 # Run the application
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5500, debug=True)
-
-@app.route('/auth/signin', methods=['POST', 'OPTIONS'])
-def signin():
-    if request.method == 'OPTIONS':
-        # Handle preflight request
-        response = jsonify({})
-        response.headers.add('Access-Control-Allow-Methods', 'POST, OPTIONS')
-        response.headers.add('Access-Control-Allow-Headers', 'Content-Type, Authorization')
-        response.headers.add('Access-Control-Allow-Credentials', 'true')
-        return response, 200
-        
-    try:
-        data = request.json
-        email = data.get('email')
-        password = data.get('password')
-        
-        if not email or not password:
-            return jsonify({"error": "Email and password are required"}), 400
-            
-        # Add your authentication logic here
-        # For example, verify against Firebase Auth
-        
-        return jsonify({
-            "message": "Successfully signed in",
-            "user": {
-                "email": email
-            }
-        })
-    except Exception as e:
-        logger.error(f"Sign in error: {str(e)}")
-        return jsonify({"error": str(e)}), 500 
+    app.run(host='0.0.0.0', port=5500, debug=True) 
